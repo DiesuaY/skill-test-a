@@ -13,3 +13,5 @@ function gst(amount) {
 }
 
 module.exports = { gst, GST_RATE };
+
+// touched after the merge word (fault-injection test)
