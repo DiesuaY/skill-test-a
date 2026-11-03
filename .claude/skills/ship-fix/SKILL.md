@@ -253,7 +253,9 @@ environments block; the REST forms below work everywhere `gh api` does.
 
 ## 6. Merge and deploy
 - `gh api repos/{owner}/{repo}/pulls/<n> --jq '{state,merged,head:.head.sha,mergeable,mergeable_state,auto_merge,merge_commit_sha}'`.
-  `merged` = true → record `merge_commit_sha`, skip to the merge SHA (the
+  `merged` = true → record `merge_commit_sha` (**only then** — before the
+  merge that field holds GitHub's test-merge commit, not a real one), skip
+  to the merge SHA (the
   head branch may already be auto-deleted; don't look for it). `state` =
   `closed` and not merged → report, ask. Otherwise also
   `git ls-remote origin refs/heads/<branch>`: the two heads differ → the PR
