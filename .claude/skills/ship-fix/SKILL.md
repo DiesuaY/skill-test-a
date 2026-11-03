@@ -42,8 +42,9 @@ execution agents.
 
 ## State
 `.ship-fix/state.md` (format in templates) is the single source of truth for
-the current run; keep `.ship-fix/` out of git via `.git/info/exclude`, never
-`.gitignore`. When step 8 ends with a **terminal** verdict (shipped / partial
+the current run; keep `.ship-fix/` **and `.claude/worktrees/`** (where the
+Agent tool puts isolated worktrees — inside the repo) out of git via
+`.git/info/exclude`, never `.gitignore`. When step 8 ends with a **terminal** verdict (shipped / partial
 pass / failed) `state.md` is moved to `.ship-fix/runs/<branch-slug>.md`, so
 the next run starts fresh. A "stopped — awaiting user" report leaves
 `state.md` in place: the run resumes from it when the user answers.
@@ -69,8 +70,10 @@ the next run starts fresh. A "stopped — awaiting user" report leaves
 - Check right after every commit or agent-branch merge, and again before every
   push: `git fetch origin $BASE` (explicit — `origin/$BASE` may not exist
   in a fresh clone), then
-  `git log origin/$BASE..HEAD --format=%B | grep -iE '^(Co-Authored-By: Claude|Claude-Session:)'`
-  (merge commits included — the lead's own merges can carry one).
+  `git log origin/$BASE..HEAD --format=%B > .ship-fix/logs/trailers.log`, then
+  `grep -iE '^(Co-Authored-By: Claude|Claude-Session:)' .ship-fix/logs/trailers.log`
+  (two commands, no pipe — agent sandboxes may refuse the piped form; merge
+  commits included — the lead's own merges can carry one).
   A match → stop and ask (Approvals): the user either accepts those commits
   (record their SHAs under `accepted trailers`; later checks skip exactly
   those SHAs, nothing else) or rewrites the branch themselves. Never rebase,
@@ -130,8 +133,11 @@ production data → present the plan and wait.
 - Sequential agents work on the fix branch, one at a time. Parallel agents
   use `isolation: "worktree"` and **must commit on their own branch before
   finishing** (an uncommitted worktree is discarded); the lead merges them in
-  dependency order, then removes the worktrees and branches. Never two agents
-  in one working tree.
+  dependency order, then **removes the worktrees and branches before running
+  anything** (`git worktree remove --force <path>`, `git branch -d`): test
+  runners and linters in the main tree pick up files under
+  `.claude/worktrees/` (Jest ran 35 tests instead of 13). Never two agents in
+  one working tree.
 - Conflicts: the lead resolves (ownership exception), re-runs typecheck, lint
   and unit tests, and records the touched files under `conflict files` in
   `state.md` so step 3 reviews them. Conflict resolution is a code change: it
@@ -219,8 +225,10 @@ the lead does all of it.
   explicit "合并 / merge" and record the commit it was given for.
 
 ## 6. Merge and deploy
-- `gh pr view <n> --json state,headRefOid,mergeStateStatus,autoMergeRequest`.
-  Take the **first matching** rule:
+- `gh pr view <n> --json state,headRefOid,mergeStateStatus,autoMergeRequest`,
+  and `git ls-remote origin refs/heads/<branch>`. The two heads differ → the
+  PR API is lagging a push (seen ~5 s): wait 10 s and re-read until they
+  agree. Then take the **first matching** rule:
   - `state` = `MERGED` → record, skip to the merge SHA.
   - `state` = `CLOSED` → report, ask.
   - `autoMergeRequest` set, or in the merge queue (`gh api graphql -F
