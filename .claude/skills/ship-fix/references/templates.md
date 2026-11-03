@@ -39,19 +39,19 @@ result: pending | pass | fail · evidence: <paths> · valid for commit: <sha>
 ## Delivery
 pr: <number/link> · ci: <CI value> for commit <sha>
 last gated commit: <head commit shown at the merge gate, or none>
-accepted trailers: <commit SHAs the user accepted with an attribution trailer, or none>
+trailer check: active | waived by user at <time>
 merge word: <received at commit sha, or none>
 base-update commit: <sha from `gh pr update-branch`, or none>
 merged: <merge SHA or none>
 post-merge ci: overall <CI value>
   <run id> <workflowName> — <raw status/conclusion> — gating: yes | no   (one line per run on the merge SHA)
-deploy: <id> — pending | success | failed | not verified | not started
+deploy: <id> — pending | success | failed | not verified | not started | n/a — no deploy
 rollback: none | proposed | approved | done
 
 ## Production verification
-smoke (read-only): pending | pass | fail | not run — <detail>
-runtime logs: pending | clean | errors | not run — <detail>
-failure mode on prod: pending | pass | fail | not reproducible read-only | not run
+smoke (read-only): pending | pass | fail | not run | n/a — no deploy — <detail>
+runtime logs: pending | clean | errors | not run | n/a — no deploy — <detail>
+failure mode on prod: pending | pass | fail | not reproducible read-only | not run | n/a — no deploy
 
 ## Last verified action
 <action> — verified by <command or observation> at <time>
@@ -104,6 +104,8 @@ under "Files you may write".
 - unit tests: `<cmd>`
 
 ## Working rules
+- First: `mkdir -p .ship-fix/logs` (the Commit rules below write there).
+- Trailer check: <active | waived — skip the trailer check in Commit rules>.
 - Write a failing test first where practical.
 - You are on branch `<branch>` (worktree: <yes/no>). Commit your own work
   before you finish; an uncommitted worktree is discarded.
@@ -124,7 +126,7 @@ passes the findings ledger every round.
 
 ```markdown
 You are an independent reviewer. You did not write this change and you will
-not change it. Repository: <path>. Review `git diff <$BASE>...HEAD` on branch
+not change it. Repository: <path>. Review `git diff origin/<$BASE>...HEAD` on branch
 <branch>. You may read any file and run: <test/lint/typecheck commands>.
 
 ## Reported problem
@@ -196,6 +198,7 @@ the log path, and report "UNEXPECTED: <what you saw>" with the command and
 its output. Do not retry, do not try another command, do not guess a fix.
 
 ## Limits
+- First: `mkdir -p .ship-fix/logs`.
 - Read-only. Do not create, edit or delete files outside `.ship-fix/logs/`,
   apart from what the listed commands themselves write (test caches, build
   output); point any trace/screenshot/report output they take as an option
@@ -276,7 +279,7 @@ structure only.
 | Unit / Integration / E2E | <x/y> / <x/y> / <x/y> |
 | PR CI | <CI value, never pending> |
 | Post-merge CI (merge SHA) | <CI value, never pending> — <n> runs checked, <m> gating |
-| Deploy | <success / failed / not verified / not started> |
+| Deploy | <success / failed / not verified / not started / n/a — no deploy> |
 | Rollback | <none / proposed / approved / done> |
 | Production smoke (read-only) | <pass / fail + detail / not run> |
 | Runtime logs | <clean / errors found / not run> |

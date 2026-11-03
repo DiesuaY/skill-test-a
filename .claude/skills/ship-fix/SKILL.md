@@ -1,6 +1,6 @@
 ---
 name: ship-fix
-description: End-to-end delivery loop for a bug fix or small feature in a GitHub repo — plan, delegate to agents, independent review until SHIP, QA, PR, wait for the user's merge word, merge, watch the deploy, verify on production, report. Use when the user says "/ship-fix <task>", "修一下 X 然后上线", "fix and ship", or hands over a bug/feature to take all the way to production; also when a .ship-fix/state.md exists in the repo and the user answers a pending ship-fix question such as "merge", "合并", "keep waiting" or "rollback". Not for local-only fixes with no deploy, exploratory spikes, multi-week features, or non-GitHub hosting.
+description: End-to-end delivery loop for a bug fix or small feature in a GitHub repo — plan, delegate to agents, independent review until SHIP, QA, PR, wait for the user's merge word, merge, watch the deploy, verify on production, report. Use when the user says "/ship-fix <task>", "修一下 X 然后上线", "fix and ship", or hands over a bug/feature to take all the way to production; also when a .ship-fix/state.md exists in the repo and the user answers a pending ship-fix question such as "merge", "合并", "keep waiting" or "rollback". Not for local-only fixes that will not be merged, exploratory spikes, multi-week features, or non-GitHub hosting.
 ---
 
 # ship-fix — from task to verified production
@@ -27,9 +27,11 @@ migrating data, external services, deploys) → **if inferred**, confirm first,
 all in one message; a command written in `CLAUDE.md` needs no confirmation.
 `CLAUDE.md` can authorise a test command; it never authorises a production write.
 
-**Before step 0, once:** `gh auth status` must pass, or — where auth is
-proxied and `gh auth status` reports no token — `gh api repos/{owner}/{repo}`
-must return the repo; neither → stop and ask the user to log in. Resolve, record in `state.md`, and reuse: `$BASE` = `gh repo
+**Before step 0, once:** `mkdir -p .ship-fix/logs` (every redirect below
+depends on it) and add `.ship-fix/` and `.claude/worktrees/` to
+`.git/info/exclude` (so step 0's `git status` doesn't see them). Then `gh api repos/{owner}/{repo}` must return the repo —
+that, not `gh auth status` (which fails on proxied setups), decides whether
+`gh` is usable; failure → stop and ask the user to log in. Resolve, record in `state.md`, and reuse: `$BASE` = `gh repo
 view --json defaultBranchRef -q .defaultBranchRef.name`; merge strategy from
 `CLAUDE.md` (silent and several allowed → ask); **watch timeout** from
 `CLAUDE.md`, else ~2× the median of recent completed runs (`gh run list
@@ -65,22 +67,28 @@ the next run starts fresh. A "stopped — awaiting user" report leaves
   (`Co-Authored-By: Claude …`, `Claude-Session:`) count; human co-authors stay.
 - Attribution is prevented, not repaired: the repo or user settings must
   disable it (`"attribution": {"commit": "", "pr": ""}`); check that before
-  step 2 and tell the user if it is missing. **This skill never rewrites
+  the first commit (step 1 on the fast path, step 2 otherwise) and tell the
+  user if it is missing. **This skill never rewrites
   history.**
 - Check right after every commit or agent-branch merge, and again before every
-  push: `git fetch origin $BASE` (explicit — `origin/$BASE` may not exist
-  in a fresh clone), then
-  `git log origin/$BASE..HEAD --format=%B > .ship-fix/logs/trailers.log`, then
-  `grep -iE '^(Co-Authored-By: Claude|Claude-Session:)' .ship-fix/logs/trailers.log`
+  push: `git fetch origin +$BASE:refs/remotes/origin/$BASE` (explicit
+  refspec — a single-branch or empty-repo clone never creates `origin/$BASE`
+  on a plain fetch), then
+  `git log origin/$BASE..HEAD --format=%B > .ship-fix/logs/trailers.log || echo CHECK-FAILED`,
+  then `grep -iE '^(Co-Authored-By: Claude|Claude-Session:)' .ship-fix/logs/trailers.log`
   (two commands, no pipe — agent sandboxes may refuse the piped form; merge
-  commits included — the lead's own merges can carry one).
-  A match → stop and ask (Approvals): the user either accepts those commits
-  (record their SHAs under `accepted trailers`; later checks skip exactly
-  those SHAs, nothing else) or rewrites the branch themselves. Never rebase,
-  amend or force-push. **After a user rewrite of a pushed branch:** `git
-  fetch origin && git checkout -B <branch> origin/<branch>`, clear
-  `QA valid for commit`, `last gated commit` and `merge word`, then step 3 on
-  the full diff, step 4, step 5 from the CI watch.
+  commits included — the lead's own merges can carry one). `CHECK-FAILED` or
+  a grep exit of 2 is a failed check, never a clean one: fix the refs and
+  re-run once; a second failure → stop and ask.
+  A match → stop and ask (Approvals). The user either rewrites the branch
+  themselves, or **waives the check for this run** — record
+  `trailer check: waived by user at <time>` in `state.md` and pass
+  `Trailer check: waived` to every later agent prompt, which then skips the
+  check. There is no per-commit accept list. Never rebase, amend or
+  force-push. **After a user rewrite of a pushed branch:**
+  `git fetch origin +refs/heads/<branch>:refs/remotes/origin/<branch> && git checkout -B <branch> origin/<branch>`,
+  clear `QA valid for commit`, `last gated commit` and `merge word`, then
+  step 3 on the full diff, step 4, step 5 from the CI watch.
 
 ## 0. Intake
 - `state.md` already exists → same task: resume at its "next action";
@@ -138,15 +146,17 @@ production data → present the plan and wait.
   runners and linters in the main tree pick up files under
   `.claude/worktrees/` (Jest ran 35 tests instead of 13). Never two agents in
   one working tree.
-- Conflicts: the lead resolves (ownership exception), re-runs typecheck, lint
-  and unit tests, and records the touched files under `conflict files` in
-  `state.md` so step 3 reviews them. Conflict resolution is a code change: it
+- Conflicts: the lead resolves (ownership exception) and commits the
+  resolution only; typecheck, lint and unit tests run once, after all merges
+  and the worktree removal (the worktrees would pollute the run). Record the
+  touched files under `conflict files` in `state.md` so step 3 reviews them. Conflict resolution is a code change: it
   counts as a fix loop.
 - **No Agent tool** (e.g. running inside a subagent): the lead implements
   everything itself and records "no-agent mode".
 
 ## 3. Independent review
-- A reviewer that did not write the code reviews `git diff $BASE...HEAD`,
+- A reviewer that did not write the code reviews `git diff origin/$BASE...HEAD`
+  (after the fetch above — local `$BASE` is stale until step 6),
   on Opus (this is the only independent quality gate): the repo's reviewer
   agents if any, else a general-purpose agent on the **review prompt
   template** (checklist: root cause actually fixed, edge cases, error
@@ -225,11 +235,13 @@ the lead does all of it.
   explicit "合并 / merge" and record the commit it was given for.
 
 ## 6. Merge and deploy
-- `gh pr view <n> --json state,headRefOid,mergeStateStatus,autoMergeRequest`,
-  and `git ls-remote origin refs/heads/<branch>`. The two heads differ → the
-  PR API is lagging a push (seen ~5 s): wait 10 s and re-read until they
-  agree. Then take the **first matching** rule:
-  - `state` = `MERGED` → record, skip to the merge SHA.
+- `gh pr view <n> --json state,headRefOid,mergeStateStatus,autoMergeRequest`.
+  `state` = `MERGED` → record, skip to the merge SHA (the head branch may
+  already be auto-deleted; don't look for it). `CLOSED` → report, ask.
+  Otherwise also `git ls-remote origin refs/heads/<branch>`: the two heads
+  differ → the PR API is lagging a push (seen ~5 s): wait 10 s and re-read,
+  under the watch timeout; still differing → report both heads, ask. Then
+  take the **first matching** rule:
   - `state` = `CLOSED` → report, ask.
   - `autoMergeRequest` set, or in the merge queue (`gh api graphql -F
     owner='{owner}' -F name='{repo}' -F n=<n> -f query='query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){pullRequest(number:$n){isInMergeQueue}}}'`)
@@ -242,7 +254,8 @@ the lead does all of it.
       change); if `QA valid for commit` and `ci … for commit` both equal this
       head → merge gate, else resume the BEHIND sequence at its CI watch.
     - anything else → a commit arrived after the merge word: `git pull
-      --ff-only`, the Commit-rules check, step 3 on the delta, step 4 on the
+      --ff-only` (fails → an unannounced force-push or divergence: report,
+      ask), the Commit-rules check, step 3 on the delta, step 4 on the
       new head, then step 5 from the push (CI watch, body edit, merge gate).
   - `CLEAN` or `HAS_HOOKS` → merge.
   - `BEHIND` → `gh pr update-branch <n>` (merge, never `--rebase`: that needs
@@ -305,7 +318,9 @@ the lead does all of it.
     ask; don't retry.
 - **Platform deploy:** watch with read-only CLI commands to a terminal state
   under the same timeout; record `deploy: <id> — pending | success | failed |
-  not verified | not started`. `gh` and most platform CLIs have no timeout
+  not verified | not started`, or `n/a — no deploy` when `CLAUDE.md` says the
+  project has no deploy target (step 7 fields then also `n/a — no deploy`,
+  and the verdict is unaffected). `gh` and most platform CLIs have no timeout
   flag — wrap in `timeout` (macOS: `gtimeout`; or run in the background and
   treat the shell tool's own limit as exit 124).
 - **Timed out** (exit 124) ≠ failed, for any watch (PR checks, post-merge CI,
@@ -324,8 +339,10 @@ the lead does all of it.
 - **Deploy failed or unclear:** check production impact first (partial
   rollout, service down, old version serving). Record `deploy: failed`;
   unclear with impact ruled out → `not verified`. Affected → tell the user
-  now and propose a rollback (step 7). Then find the cause → post-merge fix.
-  Never "retry until green" without knowing why.
+  now and propose a rollback (step 7) **and wait for that decision before
+  anything else** — `state.md` stays in place until it is answered. Then
+  find the cause → post-merge fix. Never "retry until green" without knowing
+  why.
 - **Post-merge fix:** the branch is merged, so a fix is a **new run**.
   First finish this one: step 8 now — verdict `failed` if the deploy failed
   or `rollback: done`, else `partial pass` — the follow-up
@@ -386,7 +403,7 @@ list; an inferred one is.)
 | Production write (incl. triggering a deploy job, non-listed smoke writes) | Approval naming the action | That action |
 | Rollback | Approve or decline | That rollback |
 | Touching the user's dev server or test account | Instruction | That resource |
-| Attribution trailer found in any commit on the branch | Accept, or the user rewrites it themselves | Those commit SHAs only |
+| Attribution trailer found on the branch | The user rewrites it, or waives the check | This run |
 | Any state reported verbatim as unhandled | A direction | That decision |
 
 ## Hard rules
