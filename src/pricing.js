@@ -10,7 +10,7 @@ function applyDiscount(price, percent) {
   if (price < 0 || percent < 0 || percent > 100) {
     throw new RangeError('invalid price or percent');
   }
-  return Math.round(price - price * percent);
+  return Math.round(price - (price * percent) / 100);
 }
 
 /**
