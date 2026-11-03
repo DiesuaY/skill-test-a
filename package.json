@@ -1,0 +1,14 @@
+{
+  "name": "skill-test-a",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Fixture repo for dry-running the ship-fix skill",
+  "scripts": {
+    "test": "jest --ci",
+    "lint": "node scripts/lint.js",
+    "typecheck": "node scripts/typecheck.js"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  }
+}
