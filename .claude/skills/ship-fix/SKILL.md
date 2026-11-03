@@ -53,7 +53,8 @@ the next run starts fresh. A "stopped — awaiting user" report leaves
 - **Before any action with side effects** (push, PR, update-branch, merge,
   deploy, rollback),
   check the real state — branch pushed (`git ls-remote`)? PR exists
-  (`gh api repos/{owner}/{repo}/pulls?head={owner}:<branch>&state=all`)?
+  (`gh api "repos/{owner}/{repo}/pulls?head={owner}:<branch>&state=all"` —
+  quoted, or the shell eats the `&`)?
   already merged, or `auto_merge` set? deploy for this commit already
   running? Done → record and move on, never repeat.
 - **Immediately after** such an action, after every approval received (into
@@ -209,36 +210,52 @@ the lead does all of it.
   conflict resolution.
 
 ## 5. Pull request
-All GitHub calls in steps 5–6 use the REST API through `gh api` (`{owner}` /
-`{repo}` are filled in by gh). `gh pr …` subcommands need GraphQL, which some
-environments block; the REST forms below work everywhere `gh api` does.
+All GitHub calls in steps 5–6 use the REST API: `gh api` (`{owner}` /
+`{repo}` are filled in by gh) and `gh run list` (REST as well). `gh pr …`
+subcommands need GraphQL, which some environments block; the forms below
+work everywhere `gh api` does. Quote any endpoint containing `&`.
 - Commit-rules check, push `-u`, then create the PR from the PR template (no
-  attribution footer): `jq -Rs '{title:"<title>",head:"<branch>",base:"$BASE",body:.}' .ship-fix/pr-body.md > .ship-fix/pr.json`
-  and `gh api repos/{owner}/{repo}/pulls --method POST --input .ship-fix/pr.json --jq '{number,html_url,head:.head.sha}'`.
-  Record the number and head.
+  attribution footer):
+  `jq -Rs --arg t "<title>" --arg h "<branch>" --arg b "$BASE" '{title:$t,head:$h,base:$b,body:.}' .ship-fix/pr-body.md > .ship-fix/pr.json`
+  and `gh api repos/{owner}/{repo}/pulls --method POST --input .ship-fix/pr.json --jq '{number,html_url,head:.head.sha}'`
+  (non-2xx → report the error verbatim, ask; a 422 "already exists" → find
+  it with the `pulls?head=` query above and continue with that number).
+  Record the number and head. **After every later push, set head =
+  `git rev-parse HEAD`** and confirm it against the PR's `.head.sha` before
+  watching — the watch always runs on the current head, never a stale one.
 - **CI watch** on the head SHA, polled every 20 s under the watch timeout, no
-  pipes — each poll is `gh api repos/{owner}/{repo}/commits/<head>/check-runs --jq '{n:.total_count,runs:[.check_runs[]|{name,status,conclusion}]}'`
-  plus `gh api repos/{owner}/{repo}/commits/<head>/status --jq '{n:.total_count,state}'`
+  pipes — each poll is three reads:
+  `gh api "repos/{owner}/{repo}/commits/<head>/check-runs?per_page=100" --paginate --jq '{n:.total_count,runs:[.check_runs[]|{name,status,conclusion}]}'`
+  (paginated — the default page is 30 and a failing run past it would be
+  missed; `n` must equal the number of runs listed),
+  `gh api repos/{owner}/{repo}/commits/<head>/status --jq '{n:.total_count,state}'`
   (legacy statuses; **with `n` = 0 its `state` is always `pending` and means
-  nothing — ignore `state` unless `n` > 0**). Record each poll's exit code;
-  a non-zero `gh api` exit is an error to report, not a result.
+  nothing — ignore `state` unless `n` > 0**), and
+  `gh run list --commit <head> --limit 100 --json databaseId,status,conclusion`
+  (workflow runs: a job behind `needs:` or a late matrix has no check run
+  until it is queued, so the check-runs list alone can look complete while
+  work is still coming). Record each poll's exit code; a non-zero exit is an
+  error to report, not a result.
   - both `n` = 0 → look at `.github/workflows/*` for a `pull_request`,
     `pull_request_target` or `push` trigger that matches the head branch and
     whose `paths` / `branches` filters don't exclude this change. One exists
     → CI may be slow to register: keep polling under **one** watch-timeout
     budget; budget spent with still nothing → `no CI` (not `not verified`:
     nothing was ever running). None → `no CI`.
-  - any check-run `status` ≠ `completed`, or (status `n` > 0 and `state` =
-    `pending`) → keep polling.
-  - all completed and every `conclusion` ∈ {`success`, `skipped`, `neutral`}
-    and (status `n` = 0 or `state` = `success`) → `green` (only
-    skipped/neutral → `no CI`).
-  - any `failure` / `timed_out` / `startup_failure`, or status `state` =
-    `failure` / `error` → **Red path:** Haiku log triage, fix through steps
-    2–4, then the commit-rules check and push, then back to the CI watch.
-    Each pass through the Red path is a fix loop.
+  - any check-run `status` ≠ `completed`, any workflow run `status` ≠
+    `completed`, or (status `n` > 0 and `state` = `pending`) → keep polling.
+  - everything completed → poll **once more** after 20 s; new runs appeared
+    → keep going; nothing new, every check-run `conclusion` ∈ {`success`,
+    `skipped`, `neutral`}, every workflow-run `conclusion` the same, and
+    (status `n` = 0 or `state` = `success`) → `green` (only skipped/neutral
+    → `no CI`).
+  - any `failure` / `timed_out` (check run or workflow run), or status
+    `state` = `failure` → **Red path:** Haiku log triage, fix through steps
+    2–4, then the commit-rules check and push (head updated), then back to
+    the CI watch. Each pass through the Red path is a fix loop.
   - `cancelled` → `cancelled`, report, ask. `action_required` → `awaiting
-    action`, report, wait.
+    action`, report, wait. Any other conclusion (`stale`, …) → report
+    verbatim, ask.
   - watch timeout reached → the **Timed out** rule in step 6; user stops
     waiting → `not verified`.
   Then `gh api repos/{owner}/{repo}/pulls/<n> --jq .body > .ship-fix/pr-body.md`,
@@ -261,10 +278,13 @@ environments block; the REST forms below work everywhere `gh api` does.
   `git ls-remote origin refs/heads/<branch>`: the two heads differ → the PR
   API is lagging a push (seen ~5 s): wait 10 s and re-read, under the watch
   timeout; still differing → report both heads, ask. `mergeable` = null →
-  GitHub is still computing: wait 10 s, re-read. Then take the **first
-  matching** rule:
-  - `auto_merge` set → the merge is already submitted: skip to the merge SHA
-    and poll there.
+  GitHub is still computing: wait 10 s, re-read, under the watch timeout;
+  still null → the Timed out rule. Then take the **first matching** rule:
+  - `auto_merge` set (by the user, outside this skill) → head must equal
+    both the merge-word commit and `QA valid for commit`; if not, report the
+    mismatch and ask — auto-merge can land an unreviewed head. If they match,
+    no merge call is made: poll `GET pulls/<n>` under the watch timeout until
+    `merged` is true, then take `merge_commit_sha` as the merge SHA.
   - **`merge word` is `none`, or its commit ≠ `head` → never merge.**
     Route by what `state.md` says about this head:
     - head = the last commit that reached the merge gate (word not yet given,
@@ -277,17 +297,20 @@ environments block; the REST forms below work everywhere `gh api` does.
       ask), the Commit-rules check, step 3 on the delta, step 4 on the
       new head, then step 5 from the push (CI watch, body edit, merge gate).
   - `mergeable_state` = `clean` or `has_hooks` → merge.
-  - `behind` → `gh api repos/{owner}/{repo}/pulls/<n>/update-branch --method PUT`
+  - `behind` → `gh api repos/{owner}/{repo}/pulls/<n>/update-branch --method PUT -f expected_head_sha=<head>`
     (a merge from base, never a rebase: that needs a force-push; the call is
     asynchronous — poll the PR until `head` changes, under the watch
-    timeout). Record the new head as `base-update commit`, set
+    timeout; non-2xx → re-read the PR and re-run these rules once, then
+    report verbatim and ask). Record the new head as `base-update commit`, set
     `merge word: none`, `git pull --ff-only`, the CI watch of step 5 (red →
     Red path), step 4 on the new head, body edit, then the merge gate. The
     rule above then routes it without re-review.
   - `dirty` → resolve conflicts (counts as a fix loop), steps 3–4, then step
     5 from the commit-rules check (push, CI watch, body edit, merge gate).
   - `unstable` or `blocked` → re-run the step-5 CI watch on the head:
-    pending → wait (then the Timed out rule). Failing under `unstable`
+    pending → wait (then the Timed out rule); all passing → re-read the PR
+    and re-run these rules once (the state usually becomes `clean`; if it
+    stays `blocked` it is a human gate). Failing under `unstable`
     (non-required) → the Red path of step 5, **unless** the user names that
     check and approves merging over it (Approvals table) — then merge and set
     the PR body's CI line to `red`. Failing or no checks under `blocked` (a
@@ -304,12 +327,12 @@ environments block; the REST forms below work everywhere `gh api` does.
   mergeable" or a merge-queue refusal is a human gate — this skill does not
   drive merge queues). A failing *required* check is a human gate, not
   something a named approval can merge over.
-- **Merge SHA:** the `sha` in the merge response; confirm with
+- **Merge SHA:** the `sha` in the merge response (a 2xx from PUT `/merge`
+  always means merged); confirm with
   `gh api repos/{owner}/{repo}/pulls/<n> --jq '{merged,merge_commit_sha}'`.
-  `merged` still false after a 2xx (auto-merge pending) → poll under the
-  watch timeout; timeout → the Timed out rule, merge state unknown. Record
-  the SHA; everything below keys off it, not off "latest on `$BASE`".
-  Fast-forward local `$BASE`.
+  On the `auto_merge` path the SHA comes from that poll instead. Record it;
+  everything below keys off it, not off "latest on `$BASE`". Fast-forward
+  local `$BASE`.
 - **Post-merge CI, all runs on that SHA:** `gh run list --commit <sha>
   --limit 100 --json databaseId,workflowName,status,conclusion` (empty →
   same rule as step 5: workflows with a `push` trigger on `$BASE` exist →
