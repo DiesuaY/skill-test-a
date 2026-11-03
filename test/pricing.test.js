@@ -1,5 +1,5 @@
 'use strict';
-const { applyDiscount, orderTotal } = require('../src/pricing');
+const { applyDiscount, orderTotal, orderGrandTotal } = require('../src/pricing');
 
 describe('applyDiscount', () => {
   test('0% leaves the price unchanged', () => {
@@ -27,5 +27,18 @@ describe('orderTotal', () => {
   });
   test('applies per-item discounts', () => {
     expect(orderTotal([{ price: 1000, qty: 2, discountPercent: 10 }, { price: 250, qty: 1 }])).toBe(2050);
+  });
+});
+
+describe('orderGrandTotal', () => {
+  test('applies 9% GST to the subtotal', () => {
+    expect(orderGrandTotal([{ price: 1000, qty: 1 }])).toEqual({ subtotal: 1000, tax: 90, total: 1090 });
+  });
+  test('taxes the discounted subtotal', () => {
+    expect(orderGrandTotal([{ price: 1000, qty: 2, discountPercent: 10 }])).toEqual({
+      subtotal: 1800,
+      tax: 162,
+      total: 1962,
+    });
   });
 });

@@ -1,5 +1,7 @@
 'use strict';
 
+const { gst } = require('./tax');
+
 /**
  * Apply a percentage discount to a price.
  * @param {number} price   price in cents
@@ -28,7 +30,7 @@ function orderTotal(items) {
  */
 function orderGrandTotal(items) {
   const subtotal = orderTotal(items);
-  const tax = Math.round(subtotal * 0.07);
+  const tax = gst(subtotal);
   return { subtotal, tax, total: subtotal + tax };
 }
 
