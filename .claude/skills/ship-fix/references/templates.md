@@ -41,7 +41,7 @@ pr: <number/link> · ci: <CI value> for commit <sha>
 last gated commit: <head commit shown at the merge gate, or none>
 trailer check: active | waived by user at <time>
 merge word: <received at commit sha, or none>
-base-update commit: <sha from `gh pr update-branch`, or none>
+base-update commit: <sha after PUT /pulls/<n>/update-branch, or none>
 merged: <merge SHA or none>
 post-merge ci: overall <CI value>
   <run id> <workflowName> — <raw status/conclusion> — gating: yes | no   (one line per run on the merge SHA)

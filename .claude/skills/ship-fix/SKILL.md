@@ -31,8 +31,8 @@ all in one message; a command written in `CLAUDE.md` needs no confirmation.
 depends on it) and add `.ship-fix/` and `.claude/worktrees/` to
 `.git/info/exclude` (so step 0's `git status` doesn't see them). Then `gh api repos/{owner}/{repo}` must return the repo —
 that, not `gh auth status` (which fails on proxied setups), decides whether
-`gh` is usable; failure → stop and ask the user to log in. Resolve, record in `state.md`, and reuse: `$BASE` = `gh repo
-view --json defaultBranchRef -q .defaultBranchRef.name`; merge strategy from
+`gh` is usable; failure → stop and ask the user to log in. Resolve, record
+in `state.md`, and reuse: `$BASE` = `gh api repos/{owner}/{repo} --jq .default_branch`; merge strategy from
 `CLAUDE.md` (silent and several allowed → ask); **watch timeout** from
 `CLAUDE.md`, else ~2× the median of recent completed runs (`gh run list
 --branch $BASE --status completed --limit 10 --json createdAt,updatedAt`),
@@ -52,9 +52,10 @@ the next run starts fresh. A "stopped — awaiting user" report leaves
 `state.md` in place: the run resumes from it when the user answers.
 - **Before any action with side effects** (push, PR, update-branch, merge,
   deploy, rollback),
-  check the real state — branch pushed? PR exists? `gh pr view --json
-  state,autoMergeRequest` already `MERGED`, or auto-merge set / queued? deploy
-  for this commit already running? Done → record and move on, never repeat.
+  check the real state — branch pushed (`git ls-remote`)? PR exists
+  (`gh api repos/{owner}/{repo}/pulls?head={owner}:<branch>&state=all`)?
+  already merged, or `auto_merge` set? deploy for this commit already
+  running? Done → record and move on, never repeat.
 - **Immediately after** such an action, after every approval received (into
   the Approvals table of `state.md`), and at the end of every step, update
   `state.md` before anything else.
@@ -208,45 +209,61 @@ the lead does all of it.
   conflict resolution.
 
 ## 5. Pull request
-- Commit-rules check, push `-u`, `gh pr create` from the PR template, no
-  attribution footer.
-- **CI watch:** `timeout <N>m gh pr checks <n> --watch > .ship-fix/logs/pr-checks.log 2>&1; rc=$?`
-  (no pipe). Classify by the log **and** `rc` (exit 1 is both "failed" and
-  "no checks reported"; 124 is timeout):
-  - "no checks reported" → look at `.github/workflows/*` for a
-    `pull_request`, `pull_request_target` or `push` trigger that matches the
-    head branch (or `push` on `$BASE` for post-merge) and whose `paths` /
-    `branches` filters don't exclude this change. One exists → CI may be slow to
-    register: re-run every 30 s under **one** watch-timeout budget for all
-    re-runs together; budget spent with still no checks → `no CI` (not
-    `not verified`: nothing was ever running). None → `no CI`.
-  - any failed → **Red path:** Haiku log triage, fix through steps 2–4, then
-    the commit-rules check and push, then back to the CI watch. Each pass
-    through the Red path is a fix loop.
-  - cancelled → `cancelled`, report, ask. Only skipped → `no CI`.
-  - exit 124 → the **Timed out** rule in step 6; user stops waiting →
-    `not verified`.
-  Then `gh pr view <n> --json body -q .body > .ship-fix/pr-body.md`, edit
-  the CI line from `pending` to the final value, `gh pr edit <n> --body-file
-  .ship-fix/pr-body.md` — the body the user sees must be current. Record
-  `ci … for commit <sha>` in `state.md`.
+All GitHub calls in steps 5–6 use the REST API through `gh api` (`{owner}` /
+`{repo}` are filled in by gh). `gh pr …` subcommands need GraphQL, which some
+environments block; the REST forms below work everywhere `gh api` does.
+- Commit-rules check, push `-u`, then create the PR from the PR template (no
+  attribution footer): `jq -Rs '{title:"<title>",head:"<branch>",base:"$BASE",body:.}' .ship-fix/pr-body.md > .ship-fix/pr.json`
+  and `gh api repos/{owner}/{repo}/pulls --method POST --input .ship-fix/pr.json --jq '{number,html_url,head:.head.sha}'`.
+  Record the number and head.
+- **CI watch** on the head SHA, polled every 20 s under the watch timeout, no
+  pipes — each poll is `gh api repos/{owner}/{repo}/commits/<head>/check-runs --jq '{n:.total_count,runs:[.check_runs[]|{name,status,conclusion}]}'`
+  plus `gh api repos/{owner}/{repo}/commits/<head>/status --jq '{n:.total_count,state}'`
+  (legacy statuses; **with `n` = 0 its `state` is always `pending` and means
+  nothing — ignore `state` unless `n` > 0**). Record each poll's exit code;
+  a non-zero `gh api` exit is an error to report, not a result.
+  - both `n` = 0 → look at `.github/workflows/*` for a `pull_request`,
+    `pull_request_target` or `push` trigger that matches the head branch and
+    whose `paths` / `branches` filters don't exclude this change. One exists
+    → CI may be slow to register: keep polling under **one** watch-timeout
+    budget; budget spent with still nothing → `no CI` (not `not verified`:
+    nothing was ever running). None → `no CI`.
+  - any check-run `status` ≠ `completed`, or (status `n` > 0 and `state` =
+    `pending`) → keep polling.
+  - all completed and every `conclusion` ∈ {`success`, `skipped`, `neutral`}
+    and (status `n` = 0 or `state` = `success`) → `green` (only
+    skipped/neutral → `no CI`).
+  - any `failure` / `timed_out` / `startup_failure`, or status `state` =
+    `failure` / `error` → **Red path:** Haiku log triage, fix through steps
+    2–4, then the commit-rules check and push, then back to the CI watch.
+    Each pass through the Red path is a fix loop.
+  - `cancelled` → `cancelled`, report, ask. `action_required` → `awaiting
+    action`, report, wait.
+  - watch timeout reached → the **Timed out** rule in step 6; user stops
+    waiting → `not verified`.
+  Then `gh api repos/{owner}/{repo}/pulls/<n> --jq .body > .ship-fix/pr-body.md`,
+  edit the CI line from `pending` to the final value,
+  `jq -Rs '{body:.}' .ship-fix/pr-body.md > .ship-fix/pr-body.json`,
+  `gh api repos/{owner}/{repo}/pulls/<n> --method PATCH --input .ship-fix/pr-body.json --jq '.body' > /dev/null`
+  — the body the user sees must be current. Record `ci … for commit <sha>`
+  in `state.md`.
 - **Merge gate: stop.** Record the head as `last gated commit`. Give the PR
   link, that commit, and whether the review was independent. Wait for an
   explicit "合并 / merge" and record the commit it was given for.
 
 ## 6. Merge and deploy
-- `gh pr view <n> --json state,headRefOid,mergeStateStatus,autoMergeRequest`.
-  `state` = `MERGED` → record, skip to the merge SHA (the head branch may
-  already be auto-deleted; don't look for it). `CLOSED` → report, ask.
-  Otherwise also `git ls-remote origin refs/heads/<branch>`: the two heads
-  differ → the PR API is lagging a push (seen ~5 s): wait 10 s and re-read,
-  under the watch timeout; still differing → report both heads, ask. Then
-  take the **first matching** rule:
-  - `state` = `CLOSED` → report, ask.
-  - `autoMergeRequest` set, or in the merge queue (`gh api graphql -F
-    owner='{owner}' -F name='{repo}' -F n=<n> -f query='query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){pullRequest(number:$n){isInMergeQueue}}}'`)
-    → the merge is already submitted: skip to the merge SHA and poll there.
-  - **`merge word` is `none`, or its commit ≠ `headRefOid` → never merge.**
+- `gh api repos/{owner}/{repo}/pulls/<n> --jq '{state,merged,head:.head.sha,mergeable,mergeable_state,auto_merge,merge_commit_sha}'`.
+  `merged` = true → record `merge_commit_sha`, skip to the merge SHA (the
+  head branch may already be auto-deleted; don't look for it). `state` =
+  `closed` and not merged → report, ask. Otherwise also
+  `git ls-remote origin refs/heads/<branch>`: the two heads differ → the PR
+  API is lagging a push (seen ~5 s): wait 10 s and re-read, under the watch
+  timeout; still differing → report both heads, ask. `mergeable` = null →
+  GitHub is still computing: wait 10 s, re-read. Then take the **first
+  matching** rule:
+  - `auto_merge` set → the merge is already submitted: skip to the merge SHA
+    and poll there.
+  - **`merge word` is `none`, or its commit ≠ `head` → never merge.**
     Route by what `state.md` says about this head:
     - head = the last commit that reached the merge gate (word not yet given,
       or a reset at the gate) → back to the merge gate.
@@ -257,42 +274,40 @@ the lead does all of it.
       --ff-only` (fails → an unannounced force-push or divergence: report,
       ask), the Commit-rules check, step 3 on the delta, step 4 on the
       new head, then step 5 from the push (CI watch, body edit, merge gate).
-  - `CLEAN` or `HAS_HOOKS` → merge.
-  - `BEHIND` → `gh pr update-branch <n>` (merge, never `--rebase`: that needs
-    a force-push). Record the new head as `base-update commit`, set
+  - `mergeable_state` = `clean` or `has_hooks` → merge.
+  - `behind` → `gh api repos/{owner}/{repo}/pulls/<n>/update-branch --method PUT`
+    (a merge from base, never a rebase: that needs a force-push; the call is
+    asynchronous — poll the PR until `head` changes, under the watch
+    timeout). Record the new head as `base-update commit`, set
     `merge word: none`, `git pull --ff-only`, the CI watch of step 5 (red →
     Red path), step 4 on the new head, body edit, then the merge gate. The
     rule above then routes it without re-review.
-  - `DIRTY` → resolve conflicts (counts as a fix loop), steps 3–4, then step
+  - `dirty` → resolve conflicts (counts as a fix loop), steps 3–4, then step
     5 from the commit-rules check (push, CI watch, body edit, merge gate).
-  - `UNSTABLE` or `BLOCKED` → `gh pr checks <n>`: pending → the step-5 CI
-    watch under `timeout <N>m` (then the Timed out rule). Failing under
-    `UNSTABLE` (non-required) → the Red path of step 5, **unless** the user
-    names that check and approves merging over it (Approvals table) — then
-    merge and set the PR body's CI line to `red`. Failing or no checks under
-    `BLOCKED` (a required check), all passing under `BLOCKED`, or `DRAFT` →
-    human gate (required checks, reviews, branch protection, draft status) →
-    report and wait.
-  - `UNKNOWN` or anything else → report verbatim, ask; never guess.
-- Merge pinned to the approved commit — the server refuses if the head moved:
-  `gh pr merge <n> --<strategy> --match-head-commit <approved-sha>`. Non-zero
-  exit → re-run the rules above from the top **once**; if that lands on the
-  same rule at the same head, or the merge fails a second time, report gh's
-  error verbatim and ask (never retry without `--match-head-commit`, never
-  `--admin`). A failing *required* check is a human gate, not something a
-  named approval can merge over.
-- **Merge SHA:** `gh pr view <n> --json state,mergeCommit`. `state` ≠
-  `MERGED` after a successful merge command → queued or auto-merge: poll
-  under the watch timeout, checking `isInMergeQueue` and `autoMergeRequest`
-  each time. Both gone while still `OPEN` → **ejected** (counts as a fix
-  loop): the queue's checks ran on a temporary commit, so triage
-  `gh run list --event merge_group --limit 10 --json databaseId,conclusion,headBranch`,
-  keeping only runs whose `headBranch` starts with
-  `gh-readonly-queue/$BASE/pr-<n>-`;
-  a failed run → Red path with that run's log; no failed run (removed by
-  hand, conflict) → report and ask. On `MERGED`, record `mergeCommit.oid`;
-  everything below keys off it, not off "latest on `$BASE`". Fast-forward
-  local `$BASE`.
+  - `unstable` or `blocked` → re-run the step-5 CI watch on the head:
+    pending → wait (then the Timed out rule). Failing under `unstable`
+    (non-required) → the Red path of step 5, **unless** the user names that
+    check and approves merging over it (Approvals table) — then merge and set
+    the PR body's CI line to `red`. Failing or no checks under `blocked` (a
+    required check), all passing under `blocked`, or `draft` → human gate
+    (required checks, reviews, branch protection, draft status) → report and
+    wait.
+  - `unknown` or anything else → report verbatim, ask; never guess.
+- Merge pinned to the approved commit — the server refuses with 409 if the
+  head moved:
+  `gh api repos/{owner}/{repo}/pulls/<n>/merge --method PUT -f merge_method=<squash|merge|rebase> -f sha=<approved-sha> --jq '{merged,sha}'`.
+  Non-2xx → re-run the rules above from the top **once**; if that lands on
+  the same rule at the same head, or the merge fails a second time, report
+  the API error verbatim and ask (never retry without `sha`; a 405 "not
+  mergeable" or a merge-queue refusal is a human gate — this skill does not
+  drive merge queues). A failing *required* check is a human gate, not
+  something a named approval can merge over.
+- **Merge SHA:** the `sha` in the merge response; confirm with
+  `gh api repos/{owner}/{repo}/pulls/<n> --jq '{merged,merge_commit_sha}'`.
+  `merged` still false after a 2xx (auto-merge pending) → poll under the
+  watch timeout; timeout → the Timed out rule, merge state unknown. Record
+  the SHA; everything below keys off it, not off "latest on `$BASE`".
+  Fast-forward local `$BASE`.
 - **Post-merge CI, all runs on that SHA:** `gh run list --commit <sha>
   --limit 100 --json databaseId,workflowName,status,conclusion` (empty →
   same rule as step 5: workflows with a `push` trigger on `$BASE` exist →
@@ -395,8 +410,8 @@ list; an inferred one is.)
 | Inferred high-cost / side-effect command | Confirmation | That command, this run |
 | Review oscillation or fix budget exhausted | A direction | That decision |
 | Merge | Explicit "合并 / merge" | That PR at exactly that head commit |
-| Merge over a failed non-required check (`UNSTABLE`) | Approval naming the check | That check, that commit |
-| Human gate on the PR (reviews, branch protection, `DRAFT`) | The gate cleared, or instruction | That gate |
+| Merge over a failed non-required check (`unstable`) | Approval naming the check | That check, that commit |
+| Human gate on the PR (reviews, branch protection, `draft`, merge queue) | The gate cleared, or instruction | That gate |
 | PR closed | Instruction | That PR |
 | Watch timed out | Keep waiting or not | That wait |
 | CI run `waiting` / `action_required` | The human action, or instruction | That run |
