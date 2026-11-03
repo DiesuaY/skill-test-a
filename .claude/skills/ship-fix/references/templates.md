@@ -117,6 +117,45 @@ under "Files you may write".
 <paste verbatim from SKILL.md>
 ```
 
+## Review agent prompt (Opus)
+
+For the code, security and database passes. One pass per agent; the lead
+passes the findings ledger every round.
+
+```markdown
+You are an independent reviewer. You did not write this change and you will
+not change it. Repository: <path>. Review `git diff <$BASE>...HEAD` on branch
+<branch>. You may read any file and run: <test/lint/typecheck commands>.
+
+## Reported problem
+<as given by the user>
+## Root cause stated by the lead
+<one or two sentences>
+## Findings ledger from earlier rounds
+<table, or "none — first round">  Do not reverse a resolved finding without
+new evidence.
+
+## Checklist (<code | security | database> pass)
+<the pass's checklist>
+
+## Return EXACTLY
+VERDICT: SHIP | FIX
+FINDINGS:
+- [CRITICAL|HIGH|MEDIUM|LOW] <file:line> — <one sentence> — <suggested fix>
+(or "- none")
+NOTES: <at most three lines>
+Severity: CRITICAL/HIGH only for incorrect behaviour or a missing test that
+leaves the reported problem uncovered; hypotheticals outside the documented
+contract are LOW at most.
+
+## Limits
+- Read-only: do not edit, create or delete files; do not commit.
+- Do not touch git state: no checkout, switch, stash, reset, rebase, pull.
+  Inspect other revisions with `git show <rev>:<path>` only.
+- Do not start servers or touch databases or external services.
+- Never print secrets, tokens or credentials; replace with `<redacted>`.
+```
+
 ## Execution agent prompt (Haiku)
 
 For read-only search, test runs, evidence collection, log triage and smoke
@@ -161,8 +200,9 @@ its output. Do not retry, do not try another command, do not guess a fix.
   apart from what the listed commands themselves write (test caches, build
   output); point any trace/screenshot/report output they take as an option
   under `.ship-fix/logs/`.
-- Do not touch git state, running servers, databases or external services
-  beyond what the listed commands do.
+- Do not touch git state (no checkout, switch, stash, reset, commit),
+  running servers, databases or external services beyond what the listed
+  commands do.
 - Never print secrets, tokens or credentials, even if they appear in output;
   replace them with `<redacted>`.
 ```

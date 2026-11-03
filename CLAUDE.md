@@ -19,6 +19,8 @@ Fixture repository for dry-running the `ship-fix` skill. Node 20, Jest.
   "n/a — no deploy").
 
 ## Ownership
-- One implementation agent owns `src/` and `test/`.
+- Agent `pricing` owns `src/pricing.js` and `test/pricing.test.js`.
+- Agent `tax` owns `src/tax.js` and `test/tax.test.js`.
+- Nobody else writes to `src/` or `test/`.
 - No repo-specific reviewer agents.
 - No authoritative post-merge workflow named; all runs gate.

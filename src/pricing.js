@@ -14,7 +14,7 @@ function applyDiscount(price, percent) {
 }
 
 /**
- * Total for a list of line items, each { price, qty, discountPercent? }.
+ * Subtotal for a list of line items, each { price, qty, discountPercent? }.
  */
 function orderTotal(items) {
   return items.reduce((sum, it) => {
@@ -23,4 +23,13 @@ function orderTotal(items) {
   }, 0);
 }
 
-module.exports = { applyDiscount, orderTotal };
+/**
+ * Grand total including GST: { subtotal, tax, total } in cents.
+ */
+function orderGrandTotal(items) {
+  const subtotal = orderTotal(items);
+  const tax = Math.round(subtotal * 0.07);
+  return { subtotal, tax, total: subtotal + tax };
+}
+
+module.exports = { applyDiscount, orderTotal, orderGrandTotal };

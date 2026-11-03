@@ -27,14 +27,17 @@ migrating data, external services, deploys) → **if inferred**, confirm first,
 all in one message; a command written in `CLAUDE.md` needs no confirmation.
 `CLAUDE.md` can authorise a test command; it never authorises a production write.
 
-**Before step 0, once:** `gh auth status` must pass — if not, stop and ask the
-user to log in. Resolve, record in `state.md`, and reuse: `$BASE` = `gh repo
+**Before step 0, once:** `gh auth status` must pass, or — where auth is
+proxied and `gh auth status` reports no token — `gh api repos/{owner}/{repo}`
+must return the repo; neither → stop and ask the user to log in. Resolve, record in `state.md`, and reuse: `$BASE` = `gh repo
 view --json defaultBranchRef -q .defaultBranchRef.name`; merge strategy from
 `CLAUDE.md` (silent and several allowed → ask); **watch timeout** from
 `CLAUDE.md`, else ~2× the median of recent completed runs (`gh run list
 --branch $BASE --status completed --limit 10 --json createdAt,updatedAt`),
-else 20 min. **Always pass it to `timeout` with the unit: `timeout <N>m`**
-(a bare number is seconds). The same value is the hang threshold given to
+else 20 min; **never below 5 min** (fast CI gives a median of seconds).
+**Always pass it to `timeout` with the unit: `timeout <N>m`** (a bare number
+is seconds), and **never pipe a watched command** — `… | tail` returns
+tail's exit code, not gh's; redirect to a log file and read the exit code. The same value is the hang threshold given to
 execution agents.
 
 ## State
@@ -64,7 +67,8 @@ the next run starts fresh. A "stopped — awaiting user" report leaves
   step 2 and tell the user if it is missing. **This skill never rewrites
   history.**
 - Check right after every commit or agent-branch merge, and again before every
-  push: `git fetch origin`, then
+  push: `git fetch origin $BASE` (explicit — `origin/$BASE` may not exist
+  in a fresh clone), then
   `git log origin/$BASE..HEAD --format=%B | grep -iE '^(Co-Authored-By: Claude|Claude-Session:)'`
   (merge commits included — the lead's own merges can carry one).
   A match → stop and ask (Approvals): the user either accepts those commits
@@ -85,9 +89,12 @@ the next run starts fresh. A "stopped — awaiting user" report leaves
   their word; `index.lock` only when `pgrep -x git` is empty, never kill git.
 - Create the branch now from an up-to-date `$BASE`: `fix/<slug>` or `feat/<slug>`.
 - Reproduce or locate the problem; state the root cause in one or two
-  sentences. Repository search (files, config, log excerpts) goes to a Haiku
+  sentences. Repository search that would return more than a screen of
+  output (grep across a tree, log excerpts, several commands) goes to a Haiku
   agent on the execution template — the lead receives paths, line numbers and
-  one-line summaries, not file dumps, and makes the root-cause call itself.
+  one-line summaries, not file dumps. One or two short commands the lead runs
+  itself: an agent costs ~70k tokens of baseline overhead regardless of task
+  size. The lead makes the root-cause call either way.
   Can't → stop, report what you checked. Never fix on a guess.
 
 ## Models
@@ -135,9 +142,10 @@ production data → present the plan and wait.
 ## 3. Independent review
 - A reviewer that did not write the code reviews `git diff $BASE...HEAD`,
   on Opus (this is the only independent quality gate): the repo's reviewer
-  agents if any, else a general-purpose agent with a checklist (root cause
-  actually fixed, edge cases, error handling, tests cover the fix, scope
-  creep, conflict files). Add a security pass for auth, input, DB, files,
+  agents if any, else a general-purpose agent on the **review prompt
+  template** (checklist: root cause actually fixed, edge cases, error
+  handling, tests cover the fix, scope creep, conflict files; read-only, no
+  git state changes — a reviewer once ran `git checkout` in the shared tree). Add a security pass for auth, input, DB, files,
   external calls, secrets; a database pass for SQL/migrations.
 - **Each pass returns one verdict: `SHIP` or `FIX` with findings.** The loop
   ends when every pass that ran says `SHIP`; record the verdict per pass.
@@ -154,11 +162,14 @@ production data → present the plan and wait.
   loop. After 4 with anything still failing → stop, summarise, ask.
 
 ## 4. QA
-Two agents, split by whether judgement is involved. Before either starts, the
-lead records the **id baseline** (current max ids of tables the tests will
-touch) in `state.md`. The Sonnet agent **starts only after Haiku has returned**
-(its failure-mode step may stop the DB that Haiku's suites use). In no-agent
-mode the lead does all of it.
+Up to two agents, split by whether judgement is involved. Before either
+starts, the lead records the **id baseline** (current max ids of tables the
+tests will touch) in `state.md`. The Sonnet agent runs **only if there is
+something for it** — a browser flow, a failure mode that needs environment
+manipulation, or data to clean up; otherwise the lead records those rows as
+`n/a` with the reason. It **starts only after Haiku has returned** (its
+failure-mode step may stop the DB that Haiku's suites use). In no-agent mode
+the lead does all of it.
 - **Haiku, execution template:** full unit suite; integration tests (local
   DB/containers if the repo has them); E2E if present — told to **run every
   suite regardless of earlier exits**, with trace/screenshot output pointed
@@ -183,9 +194,9 @@ mode the lead does all of it.
 ## 5. Pull request
 - Commit-rules check, push `-u`, `gh pr create` from the PR template, no
   attribution footer.
-- **CI watch:** `timeout <N>m gh pr checks <n> --watch`. Classify
-  by the output, not the exit code alone (exit 1 is both "failed" and "no
-  checks reported"):
+- **CI watch:** `timeout <N>m gh pr checks <n> --watch > .ship-fix/logs/pr-checks.log 2>&1; rc=$?`
+  (no pipe). Classify by the log **and** `rc` (exit 1 is both "failed" and
+  "no checks reported"; 124 is timeout):
   - "no checks reported" → look at `.github/workflows/*` for a
     `pull_request`, `pull_request_target` or `push` trigger that matches the
     head branch (or `push` on `$BASE` for post-merge) and whose `paths` /
